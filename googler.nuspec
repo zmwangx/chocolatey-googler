@@ -1,0 +1,31 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!-- Do not remove this test for UTF-8: if “Ω” doesn’t appear as greek uppercase omega letter enclosed in quotation marks, you should use an editor that supports UTF-8, not this one. -->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>googler</id>
+    <version>3.7.1</version>
+    <title>googler</title>
+    <owners>Zhiming Wang</owners>
+    <authors>Arun Prakash Jana, Zhiming Wang</authors>
+    <projectUrl>https://github.com/jarun/googler</projectUrl>
+    <iconUrl>https://s.tcl.sh/googler.svg</iconUrl>
+    <licenseUrl>https://github.com/jarun/googler/blob/master/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>google search news cli command-line</tags>
+    <summary>Google from the terminal.</summary>
+    <description>googler is a power tool to perform Google Search (Web or News) from the command-line. It shows the title, URL and abstract for each result, which can be directly opened in a browser from the terminal. Results are fetched in pages (with page navigation). Supports sequential searches in a single googler instance.
+
+googler was initially written to cater to headless servers without X. You can integrate it with a text-based browser. However, it has grown into a very handy and flexible utility that delivers much more. For example, fetch any number of results or start anywhere, limit search by any duration, define aliases to google search any number of websites, switch domains easily... all of this in a very clean interface without ads or stray URLs. The shell completion scripts make sure you don't need to remember any options.
+
+googler isn't affiliated to Google in any way.</description>
+    <releaseNotes>https://github.com/jarun/googler/releases</releaseNotes>
+    <packageSourceUrl>https://github.com/zmwangx/chocolatey-googler</packageSourceUrl>
+    <dependencies>
+      <dependency id="python" version="3.4.0" />
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+    <file src="legal\**" target="legal" />
+  </files>
+</package>
