@@ -8,7 +8,7 @@
     <owners>Zhiming Wang</owners>
     <authors>Arun Prakash Jana, Zhiming Wang</authors>
     <projectUrl>https://github.com/jarun/googler</projectUrl>
-    <iconUrl>https://s.tcl.sh/googler.svg</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/jarun/googler@v3.7.1/googler.svg</iconUrl>
     <licenseUrl>https://github.com/jarun/googler/blob/master/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <tags>google search news cli command-line</tags>

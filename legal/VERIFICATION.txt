@@ -15,7 +15,8 @@ Package can be verified like this:
    - Use powershell function 'Get-FileHash'
    - Use Chocolatey utility 'checksum.exe'
 
-   checksum: 789e4d8e7d4774a58a1382f8be5a00e74356242d587d16a182fee08ad20e63b9
+   checksum algorithm: SHA256
+   checksum: 789E4D8E7D4774A58A1382F8BE5A00E74356242D587D16A182FEE08AD20E63B9
 
 File 'LICENSE.txt' is obtained from:
    https://raw.githubusercontent.com/jarun/googler/master/LICENSE
