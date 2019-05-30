@@ -30,6 +30,7 @@ from http.client import HTTPSConnection
 import locale
 import logging
 import os
+import platform
 import shutil
 import signal
 import socket
@@ -73,7 +74,7 @@ except ValueError:
 
 # Constants
 
-_VERSION_ = '3.8'
+_VERSION_ = '3.9'
 
 COLORMAP = {k: '\x1b[%sm' % v for k, v in {
     'a': '30', 'b': '31', 'c': '32', 'd': '33',
@@ -87,8 +88,7 @@ COLORMAP = {k: '\x1b[%sm' % v for k, v in {
     'x': '0', 'X': '1', 'y': '7', 'Y': '7;1',
 }.items()}
 
-USER_AGENT = ('googler/' + _VERSION_)
-ua = True  # User Agent is enabled by default
+USER_AGENT = 'googler/%s (like MSIE)' % _VERSION_
 
 text_browsers = ['elinks', 'links', 'lynx', 'w3m', 'www-browser']
 
@@ -1988,7 +1988,17 @@ class GoogleConnection(object):
             if resp.status in {301, 302, 303, 307, 308}:
                 redirection_url = resp.getheader('location', '')
                 if 'sorry/IndexRedirect?' in redirection_url or 'sorry/index?' in redirection_url:
-                    raise GoogleConnectionError('Connection blocked due to unusual activity.')
+                    msg = textwrap.dedent("""\
+                    Connection blocked due to unusual activity.
+                    THIS IS NOT A BUG, please do NOT report it as a bug unless you have specific
+                    information that may lead to the development of a workaround.
+                    You IP address is temporarily or permanently blocked by Google and requires
+                    reCAPTCHA-solving to use the service, which googler is not capable of.
+                    Possible causes include issuing too many queries in a short time frame, or
+                    operating from a shared / low reputation IP with a history of abuse.
+                    Please do NOT use googler for automated scraping.""")
+                    msg = " ".join(msg.splitlines())
+                    raise GoogleConnectionError(msg)
                 self._redirect(redirection_url)
                 resp = self._resp
                 redirect_counter += 1
@@ -2056,7 +2066,7 @@ class GoogleConnection(object):
         self._conn.request('GET', url, None, {
             'Accept': 'text/html',
             'Accept-Encoding': 'gzip',
-            'User-Agent': USER_AGENT if ua else '',
+            'User-Agent': USER_AGENT,
             'Cookie': self.cookie,
             'Connection': 'keep-alive',
             'DNT': '1',
@@ -2111,7 +2121,12 @@ class GoogleParser(object):
                 if mime:
                     title = mime.text + ' ' + title
                 url = self.unwrap_link(a.attr('href'))
-                abstract = div_g.select('.st').text.replace('\n', '')
+                matched_keywords = []
+                abstract = ''
+                for childnode in div_g.select('.st').children:
+                    if childnode.tag == 'b' and childnode.text != '...':
+                            matched_keywords.append({'phrase': childnode.text, 'offset': len(abstract)})
+                    abstract = abstract + childnode.text.replace('\n', '')
                 try:
                     metadata = div_g.select('.slp').text
                     metadata = metadata.replace('\u200e', '').replace(' - ', ', ').strip()
@@ -2131,7 +2146,7 @@ class GoogleParser(object):
                     continue
             index += 1
             self.results.append(Result(index, title, url, abstract,
-                                       metadata=metadata, sitelinks=sitelinks))
+                                       metadata=metadata, sitelinks=sitelinks, matches=matched_keywords))
 
         # Showing results for ...
         # Search instead for ...
@@ -2211,6 +2226,7 @@ class Result(object):
     abstract : str
     metadata : str or None
     sitelinks : list
+    matches : list
 
     Class Variables
     ---------------
@@ -2228,7 +2244,7 @@ class Result(object):
     colors = None
     urlexpand = True
 
-    def __init__(self, index, title, url, abstract, metadata=None, sitelinks=None):
+    def __init__(self, index, title, url, abstract, metadata=None, sitelinks=None, matches=None):
         index = str(index)
         self.index = index
         self.title = title
@@ -2236,6 +2252,7 @@ class Result(object):
         self.abstract = abstract
         self.metadata = metadata
         self.sitelinks = [] if sitelinks is None else sitelinks
+        self.matches = [] if matches is None else matches
 
         self._urltable = {index: url}
         subindex = 'a'
@@ -2266,7 +2283,7 @@ class Result(object):
             else:
                 print(' %s%-*s %s %s' % (' ' * pre, indent, index + '.', title, url))
 
-    def _print_metadata_and_abstract(self, abstract, metadata=None, indent=5, pre=0):
+    def _print_metadata_and_abstract(self, abstract, metadata=None, matches=None, indent=5, pre=0):
         colors = self.colors
         try:
             columns, _ = os.get_terminal_size()
@@ -2280,6 +2297,15 @@ class Result(object):
                 print(' ' * (indent + pre) + metadata)
 
         if colors:
+            # Start from the last match, as inserting the bold characters changes the offsets.
+            for match in reversed(matches or []):
+                abstract = (
+                    abstract[: match['offset']]
+                    + '\033[1m'
+                    + match['phrase']
+                    + '\033[0m'
+                    + abstract[match['offset'] + len(match['phrase']) :]
+                )
             print(colors.abstract, end='')
         if columns > indent + 1 + pre:
             # Try to fill to columns
@@ -2295,7 +2321,7 @@ class Result(object):
     def print(self):
         """Print the result entry."""
         self._print_title_and_url(self.index, self.title, self.url)
-        self._print_metadata_and_abstract(self.abstract, metadata=self.metadata)
+        self._print_metadata_and_abstract(self.abstract, metadata=self.metadata, matches=self.matches)
 
         for sitelink in self.sitelinks:
             self._print_title_and_url(sitelink.index, sitelink.title, sitelink.url, pre=4)
@@ -2312,6 +2338,8 @@ class Result(object):
             obj['metadata'] = self.metadata
         if self.sitelinks:
             obj['sitelinks'] = [sitelink.__dict__ for sitelink in self.sitelinks]
+        if self.matches:
+            obj['matches'] = self.matches
         return obj
 
     def urltable(self):
@@ -2448,7 +2476,7 @@ class GooglerCmd(object):
 
         if logger.isEnabledFor(logging.DEBUG):
             import tempfile
-            fd, tmpfile = tempfile.mkstemp(prefix='googler-response-')
+            fd, tmpfile = tempfile.mkstemp(prefix='googler-response-', suffix='.html')
             os.close(fd)
             with open(tmpfile, 'w', encoding='utf-8') as fp:
                 fp.write(page)
@@ -3046,6 +3074,31 @@ def parse_proxy_spec(proxyspec):
     return user_passwd, host_port
 
 
+def set_win_console_mode():
+    # VT100 control sequences are supported on Windows 10 Anniversary Update and later.
+    # https://docs.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
+    # https://docs.microsoft.com/en-us/windows/console/setconsolemode
+    if platform.release() == '10':
+        STD_OUTPUT_HANDLE = -11
+        STD_ERROR_HANDLE = -12
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        try:
+            from ctypes import windll, wintypes, byref
+            kernel32 = windll.kernel32
+            for nhandle in (STD_OUTPUT_HANDLE, STD_ERROR_HANDLE):
+                handle = kernel32.GetStdHandle(nhandle)
+                old_mode = wintypes.DWORD()
+                if not kernel32.GetConsoleMode(handle, byref(old_mode)):
+                    raise RuntimeError('GetConsoleMode failed')
+                new_mode = old_mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                if not kernel32.SetConsoleMode(handle, new_mode):
+                    raise RuntimeError('SetConsoleMode failed')
+            # Note: No need to restore at exit. SetConsoleMode seems to
+            # be limited to the calling process.
+        except Exception:
+            pass
+
+
 # Query autocompleter
 
 # This function is largely experimental and could raise any exception;
@@ -3126,8 +3179,13 @@ def parse_args(args=None, namespace=None):
     addarg('-l', '--lang', metavar='LANG', help='display in language LANG')
     addarg('-x', '--exact', action='store_true',
            help='disable automatic spelling correction')
-    addarg('-C', '--nocolor', dest='colorize', action='store_false',
-           help='disable color output')
+    addarg('--colorize', nargs='?', choices=['auto', 'always', 'never'],
+           const='always', default='auto',
+           help="""whether to colorize output; defaults to 'auto', which enables
+           color when stdout is a tty device; using --colorize without an argument
+           is equivalent to --colorize=always""")
+    addarg('-C', '--nocolor', action='store_true',
+           help='equivalent to --colorize=never')
     addarg('--colors', dest='colorstr', type=argparser.is_colorstr,
            default=colorstr_env if colorstr_env else 'GKlgxy', metavar='COLORS',
            help='set output colors (see man page for details)')
@@ -3142,7 +3200,7 @@ def parse_args(args=None, namespace=None):
     addarg('-p', '--proxy', default=https_proxy_from_environment(),
            help="""tunnel traffic through an HTTP proxy;
            PROXY is of the form [http://][user:password@]proxyhost[:port]""")
-    addarg('--noua', action='store_true', help='disable user agent')
+    addarg('--noua', action='store_true', help='legacy option (no effect)')
     addarg('--notweak', action='store_true',
            help='disable TCP optimizations and forced TLS 1.2')
     addarg('--json', action='store_true',
@@ -3165,12 +3223,14 @@ def parse_args(args=None, namespace=None):
     addarg('-D', '--debugger', action='store_true', help=argparse.SUPPRESS)
     addarg('--complete', help=argparse.SUPPRESS)
 
-    return argparser.parse_args(args, namespace)
+    parsed = argparser.parse_args(args, namespace)
+    if parsed.nocolor:
+        parsed.colorize = 'never'
+
+    return parsed
 
 
 def main():
-    global ua
-
     try:
         opts = parse_args()
 
@@ -3203,13 +3263,24 @@ def main():
                 pass
 
         # Set colors
-        if opts.colorize:
+        if opts.colorize == 'always':
+            colorize = True
+        elif opts.colorize == 'auto':
+            colorize = sys.stdout.isatty()
+        else:  # opts.colorize == 'never'
+            colorize = False
+
+        if colorize:
             colors = Colors(*[COLORMAP[c] for c in opts.colorstr], reset=COLORMAP['x'])
         else:
             colors = None
         Result.colors = colors
         Result.urlexpand = True if os.getenv('DISABLE_URL_EXPANSION') is None else False
         GooglerCmd.colors = colors
+
+        # Try to enable ANSI color support in cmd or PowerShell on Windows 10
+        if sys.platform == 'win32' and sys.stdout.isatty() and colorize:
+            set_win_console_mode()
 
         if opts.url_handler is not None:
             open_url.url_handler = opts.url_handler
@@ -3224,8 +3295,7 @@ def main():
                 open_url.suppress_browser_output = True
 
         if opts.noua:
-            logger.debug('User Agent is disabled')
-            ua = False
+            logger.warning('--noua option has been deprecated and has no effect (see #284)')
 
         repl = GooglerCmd(opts)
 

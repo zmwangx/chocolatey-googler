@@ -3,12 +3,12 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>googler</id>
-    <version>3.8</version>
+    <version>3.9</version>
     <title>googler</title>
     <owners>Zhiming Wang</owners>
     <authors>Arun Prakash Jana, Zhiming Wang</authors>
     <projectUrl>https://github.com/jarun/googler</projectUrl>
-    <iconUrl>https://cdn.jsdelivr.net/gh/jarun/googler@v3.8/googler.svg</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/jarun/googler@v3.9/googler.svg</iconUrl>
     <licenseUrl>https://github.com/jarun/googler/blob/master/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <tags>google search news cli command-line</tags>
