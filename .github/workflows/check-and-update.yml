@@ -1,0 +1,50 @@
+name: Check and update to latest release
+on:
+  push:
+  schedule:
+    - cron: "0 0 * * *"
+jobs:
+  check-and-update:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.x"
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -r automation/requirements.txt
+      - name: Check and update source
+        # This step sets UPDATED to true and NEW_VERSION to the new version
+        # number in environment if there's an update.
+        run: |
+          python automation/check_and_update.py
+      - name: Pack
+        if: env.UPDATED == 'true'
+        run: |
+          choco pack
+      - name: Push to Chocolatey repository
+        if: env.UPDATED == 'true'
+        env:
+          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+        run: |
+          choco push googler.${Env:NEW_VERSION}.nupkg --key $Env:CHOCOLATEY_API_KEY
+      - name: Commit changes
+        run: |
+          git config user.name 'Zhiming Wang'
+          git config user.email 'i@zhimingwang.org'
+          git add .
+          git commit -m "Update to v${Env:NEW_VERSION} (from GitHub Actions)"
+          $ErrorActionPreference = 'SilentlyContinue'  # somehow the push would succeed yet set exit code to 1
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        if: env.UPDATED == 'true'
+      - name: Upload artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: googler.${{ env.NEW_VERSION }}.nupkg
+          path: googler.${{ env.NEW_VERSION }}.nupkg
+        if: env.UPDATED == 'true'
