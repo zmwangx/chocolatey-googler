@@ -21,7 +21,7 @@ googler isn't affiliated to Google in any way.</description>
     <releaseNotes>https://github.com/jarun/googler/releases</releaseNotes>
     <packageSourceUrl>https://github.com/zmwangx/chocolatey-googler</packageSourceUrl>
     <dependencies>
-      <dependency id="python" version="3.4.0" />
+      <dependency id="python" version="3.5.0" />
     </dependencies>
   </metadata>
   <files>
