@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # Copyright © 2008 Henri Hakkinen
-# Copyright © 2015-2019 Arun Prakash Jana <engineerarun@gmail.com>
+# Copyright © 2015-2020 Arun Prakash Jana <engineerarun@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -55,6 +55,21 @@ try:
 except (ImportError, Exception):
     pass
 
+from typing import (
+    Any,
+    Dict,
+    Generator,
+    Iterable,
+    Iterator,
+    List,
+    Match,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
+
 # Basic setup
 
 logging.basicConfig(format='[%(levelname)s] %(message)s')
@@ -74,7 +89,7 @@ except ValueError:
 
 # Constants
 
-_VERSION_ = '3.9'
+_VERSION_ = '4.1'
 
 COLORMAP = {k: '\x1b[%sm' % v for k, v in {
     'a': '30', 'b': '31', 'c': '32', 'd': '33',
@@ -88,7 +103,7 @@ COLORMAP = {k: '\x1b[%sm' % v for k, v in {
     'x': '0', 'X': '1', 'y': '7', 'Y': '7;1',
 }.items()}
 
-USER_AGENT = 'googler/%s (like MSIE)' % _VERSION_
+USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/78.0.3904.108 Safari/537.36'
 
 text_browsers = ['elinks', 'links', 'lynx', 'w3m', 'www-browser']
 
@@ -152,6 +167,98 @@ def monkeypatch_textwrap_for_cjk():
 monkeypatch_textwrap_for_cjk()
 
 
+CoordinateType = Tuple[int, int]
+
+
+class TrackedTextwrap:
+    """
+    Implements a text wrapper that tracks the position of each source
+    character, and can correctly insert zero-width sequences at given
+    offsets of the source text.
+
+    Wrapping result should be the same as that from PSL textwrap.wrap
+    with default settings except expand_tabs=False.
+    """
+
+    def __init__(self, text: str, width: int):
+        self._original = text
+
+        # Do the job of replace_whitespace first so that we can easily
+        # match text to wrapped lines later. Note that this operation
+        # does not change text length or offsets.
+        whitespace = "\t\n\v\f\r "
+        whitespace_trans = str.maketrans(whitespace, " " * len(whitespace))
+        text = text.translate(whitespace_trans)
+
+        self._lines = textwrap.wrap(
+            text, width, expand_tabs=False, replace_whitespace=False
+        )
+
+        # self._coords track the (row, column) coordinate of each source
+        # character in the result text. It is indexed by offset in
+        # source text.
+        self._coords = []  # type: List[CoordinateType]
+        offset = 0
+        try:
+            if not self._lines:
+                # Source text only has whitespaces. We add an empty line
+                # in order to produce meaningful coordinates.
+                self._lines = [""]
+            for row, line in enumerate(self._lines):
+                assert text[offset : offset + len(line)] == line
+                col = 0
+                for _ in line:
+                    self._coords.append((row, col))
+                    offset += 1
+                    col += 1
+                # All subsequent dropped whitespaces map to the last, imaginary column
+                # (the EOL character if you wish) of the current line.
+                while offset < len(text) and text[offset] == " ":
+                    self._coords.append((row, col))
+                    offset += 1
+            # One past the final character (think of it as EOF) should
+            # be treated as a valid offset.
+            self._coords.append((row, col))
+        except AssertionError:
+            raise RuntimeError(
+                "TrackedTextwrap: the impossible happened at offset {} of text {!r}".format(
+                    offset, self._original
+                )
+            )
+
+    # seq should be a zero-width sequence, e.g., an ANSI escape sequence.
+    # May raise IndexError if offset is out of bounds.
+    def insert_zero_width_sequence(self, seq: str, offset: int) -> None:
+        row, col = self._coords[offset]
+        line = self._lines[row]
+        self._lines[row] = line[:col] + seq + line[col:]
+
+        # Shift coordinates of all characters after the given character
+        # on the same line.
+        shift = len(seq)
+        offset += 1
+        while offset < len(self._coords) and self._coords[offset][0] == row:
+            _, col = self._coords[offset]
+            self._coords[offset] = (row, col + shift)
+            offset += 1
+
+    @property
+    def original(self) -> str:
+        return self._original
+
+    @property
+    def lines(self) -> List[str]:
+        return self._lines
+
+    @property
+    def wrapped(self) -> str:
+        return "\n".join(self._lines)
+
+    # May raise IndexError if offset is out of bounds.
+    def get_coordinate(self, offset: int) -> CoordinateType:
+        return self._coords[offset]
+
+
 ### begin dim (DOM implementation with CSS support) ###
 ### https://github.com/zmwangx/dim/blob/master/dim.py ###
 
@@ -161,34 +268,6 @@ import textwrap
 from collections import OrderedDict
 from enum import Enum
 from html.parser import HTMLParser
-
-try:
-    from typing import (
-        Any,
-        Dict,
-        Generator,
-        Iterable,
-        Iterator,
-        List,
-        Match,
-        Optional,
-        Tuple,
-        Union,
-        cast,
-    )
-except ImportError:  # pragma: no cover
-    # Python 3.4 without external typing module
-
-    class _TypeStub:
-        def __getitem__(self, _):  # type: ignore
-            return None
-
-    Any = None
-    Dict = Generator = Iterable = Iterator = List = Match = _TypeStub()  # type: ignore
-    Optional = Tuple = Union = _TypeStub()  # type: ignore
-
-    def cast(typ, val):  # type: ignore
-        return val
 
 
 SelectorGroupLike = Union[str, "SelectorGroup", "Selector"]
@@ -437,16 +516,16 @@ class ElementNode(Node):
     def __init__(
         self,
         tag: str,
-        attrs: Iterable[Tuple[str, str]],
+        attrs: Iterable[Tuple[str, Optional[str]]],
         *,
         parent: Optional["Node"] = None,
-        children: Optional[List["Node"]] = None
+        children: Optional[Sequence["Node"]] = None
     ) -> None:
         Node.__init__(self)
         self.tag = tag.lower()  # type: str
-        self.attrs = OrderedDict((attr.lower(), val) for attr, val in attrs)
+        self.attrs = OrderedDict((attr.lower(), val or "") for attr, val in attrs)
         self.parent = parent
-        self.children = children or []
+        self.children = list(children or [])
 
     def __repr__(self) -> str:
         s = "<" + self.tag
@@ -582,7 +661,9 @@ class DOMBuilder(HTMLParser):
         super().__init__(convert_charrefs=True)
         self._stack = []  # type: List[Node]
 
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, str]]) -> None:
+    def handle_starttag(
+        self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]
+    ) -> None:
         node = ElementNode(tag, attrs)
         node._partial = True
         self._stack.append(node)
@@ -614,7 +695,9 @@ class DOMBuilder(HTMLParser):
     # handle_starttag only, whereas the latter triggers
     # handle_startendtag (which by default triggers both handle_starttag
     # and handle_endtag). See https://www.bugs.python.org/issue25258.
-    def handle_startendtag(self, tag: str, attrs: List[Tuple[str, str]]) -> None:
+    def handle_startendtag(
+        self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]
+    ) -> None:
         self.handle_starttag(tag, attrs)
 
     def handle_data(self, text: str) -> None:
@@ -848,16 +931,16 @@ class Selector:
         self,
         *,
         tag: Optional[str] = None,
-        classes: Optional[List[str]] = None,
+        classes: Optional[Sequence[str]] = None,
         id: Optional[str] = None,
-        attrs: Optional[List["AttributeSelector"]] = None,
+        attrs: Optional[Sequence["AttributeSelector"]] = None,
         combinator: Optional["Combinator"] = None,
         previous: Optional["Selector"] = None
     ) -> None:
         self.tag = tag.lower() if tag else None
-        self.classes = classes or []
+        self.classes = list(classes or [])
         self.id = id
-        self.attrs = attrs or []
+        self.attrs = list(attrs or [])
         self.combinator = combinator
         self.previous = previous
 
@@ -1501,6 +1584,8 @@ class GoogleUrl(object):
         Read-write property.
     news : bool
         Read-only property.
+    videos : bool
+        Read-only property.
     url : str
         Read-only property.
 
@@ -1570,6 +1655,11 @@ class GoogleUrl(object):
         """Whether the URL is for Google News."""
         return 'tbm' in self._query_dict and self._query_dict['tbm'] == 'nws'
 
+    @property
+    def videos(self):
+        """Whether the URL is for Google Videos."""
+        return 'tbm' in self._query_dict and self._query_dict['tbm'] == 'vid'
+
     def full(self):
         """Return the full URL.
 
@@ -1619,6 +1709,7 @@ class GoogleUrl(object):
                 keywords: str or list of strs
                 lang: str
                 news: bool
+                videos: bool
                 num: int
                 site: str
                 start: int
@@ -1641,22 +1732,27 @@ class GoogleUrl(object):
         opts.update(kwargs)
 
         qd = self._query_dict
-        if 'duration' in opts and opts['duration']:
+        if opts.get('duration'):
             qd['tbs'] = 'qdr:%s' % opts['duration']
         if 'exact' in opts:
             if opts['exact']:
                 qd['nfpr'] = 1
             else:
                 qd.pop('nfpr', None)
+        if opts.get('from') or opts.get('to'):
+            cd_min = opts.get('from') or ''
+            cd_max = opts.get('to') or ''
+            qd['tbs'] = 'cdr:1,cd_min:%s,cd_max:%s' % (cd_min, cd_max)
         if 'keywords' in opts:
             self._keywords = opts['keywords']
         if 'lang' in opts and opts['lang']:
             qd['hl'] = opts['lang']
-        if 'news' in opts:
-            if opts['news']:
-                qd['tbm'] = 'nws'
-            else:
-                qd.pop('tbm', None)
+        if 'news' in opts and opts['news']:
+            qd['tbm'] = 'nws'
+        elif 'videos' in opts and opts['videos']:
+            qd['tbm'] = 'vid'
+        else:
+            qd.pop('tbm', None)
         if 'num' in opts:
             self._num = opts['num']
         if 'sites' in opts:
@@ -2087,8 +2183,9 @@ class GoogleConnection(object):
 
 class GoogleParser(object):
 
-    def __init__(self, html, *, news=False):
+    def __init__(self, html, *, news=False, videos=False):
         self.news = news
+        self.videos = videos
         self.autocorrected = False
         self.showing_results_for = None
         self.filtered = False
@@ -2114,22 +2211,30 @@ class GoogleParser(object):
                 # Skip smart cards.
                 continue
             try:
-                h3 = div_g.select('h3.r')
-                a = h3.select('a')
-                title = a.text
-                mime = div_g.select('.mime')
-                if mime:
-                    title = mime.text + ' ' + title
-                url = self.unwrap_link(a.attr('href'))
+                h3 = div_g.select('div.r h3')
+                if h3:
+                    title = h3.text
+                    url = self.unwrap_link(h3.parent.attr('href'))
+                else:
+                    h3 = div_g.select('h3.r')
+                    a = h3.select('a')
+                    title = a.text
+                    mime = div_g.select('.mime')
+                    if mime:
+                        title = mime.text + ' ' + title
+                    url = self.unwrap_link(a.attr('href'))
                 matched_keywords = []
                 abstract = ''
                 for childnode in div_g.select('.st').children:
+                    if 'f' in childnode.classes:
+                        # .f is handled as metadata instead.
+                        continue
                     if childnode.tag == 'b' and childnode.text != '...':
-                            matched_keywords.append({'phrase': childnode.text, 'offset': len(abstract)})
+                        matched_keywords.append({'phrase': childnode.text, 'offset': len(abstract)})
                     abstract = abstract + childnode.text.replace('\n', '')
                 try:
-                    metadata = div_g.select('.slp').text
-                    metadata = metadata.replace('\u200e', '').replace(' - ', ', ').strip()
+                    metadata = div_g.select('.f').text
+                    metadata = metadata.replace('\u200e', '').replace(' - ', ', ').strip().rstrip(',')
                 except AttributeError:
                     metadata = None
             except (AttributeError, ValueError):
@@ -2148,14 +2253,33 @@ class GoogleParser(object):
             self.results.append(Result(index, title, url, abstract,
                                        metadata=metadata, sitelinks=sitelinks, matches=matched_keywords))
 
+        if not self.results:
+            for card in tree.select_all('g-card'):
+                a = card.select('a[href]')
+                if not a:
+                    continue
+                url = self.unwrap_link(a.attr('href'))
+                text_nodes = []
+                for node in a.descendants():
+                    if isinstance(node, TextNode) and node.strip():
+                        text_nodes.append(node.text)
+                if len(text_nodes) != 4:
+                    continue
+                publisher, title, abstract, publishing_time = text_nodes
+                metadata = '%s, %s' % (publisher, publishing_time)
+                index += 1
+                self.results.append(Result(index, title, url, abstract, metadata=metadata))
+
         # Showing results for ...
         # Search instead for ...
         spell_orig = tree.select("span.spell_orig")
         if spell_orig:
-            self.autocorrected = True
-            self.showing_results_for = next(
+            showing_results_for_link = next(
                 filter(lambda el: el.tag == "a", spell_orig.previous_siblings()), None
-            ).text
+            )
+            if showing_results_for_link:
+                self.autocorrected = True
+                self.showing_results_for = showing_results_for_link.text
 
         # No results found for ...
         # Results for ...:
@@ -2171,14 +2295,14 @@ class GoogleParser(object):
         self.filtered = tree.select('p#ofr') is not None
 
     # Unwraps /url?q=http://...&sa=...
-    # May raise ValueError.
+    # TODO: don't unwrap if URL isn't in this form.
     @staticmethod
     def unwrap_link(link):
         qs = urllib.parse.urlparse(link).query
         try:
             url = urllib.parse.parse_qs(qs)['q'][0]
         except KeyError:
-            raise ValueError(link)
+            return link
         else:
             if "://" in url:
                 return url
@@ -2262,7 +2386,7 @@ class Result(object):
             self._urltable[fullindex] = sitelink.url
             subindex = chr(ord(subindex) + 1)
 
-    def _print_title_and_url(self, index, title, url, indent=3, pre=0):
+    def _print_title_and_url(self, index, title, url, indent=0):
         colors = self.colors
 
         if not self.urlexpand:
@@ -2270,20 +2394,20 @@ class Result(object):
 
         if colors:
             # Adjust index to print result index clearly
-            print(" %s%s%-*s%s" % (' ' * pre, colors.index, indent, index + '.', colors.reset), end='')
+            print(" %s%s%-3s%s" % (' ' * indent, colors.index, index + '.', colors.reset), end='')
             if not self.urlexpand:
                 print(' ' + colors.title + title + colors.reset + ' ' + colors.url + url + colors.reset)
             else:
                 print(' ' + colors.title + title + colors.reset)
-                print(' ' * (indent + 2 + pre) + colors.url + url + colors.reset)
+                print(' ' * (indent + 5) + colors.url + url + colors.reset)
         else:
             if self.urlexpand:
-                print(' %s%-*s %s' % (' ' * pre, indent, index + '.', title))
-                print(' %s%s' % (' ' * (indent + 1 + pre), url))
+                print(' %s%-3s %s' % (' ' * indent, index + '.', title))
+                print(' %s%s' % (' ' * (indent + 4), url))
             else:
-                print(' %s%-*s %s %s' % (' ' * pre, indent, index + '.', title, url))
+                print(' %s%-3s %s %s' % (' ' * indent, index + '.', title, url))
 
-    def _print_metadata_and_abstract(self, abstract, metadata=None, matches=None, indent=5, pre=0):
+    def _print_metadata_and_abstract(self, abstract, metadata=None, matches=None, indent=0):
         colors = self.colors
         try:
             columns, _ = os.get_terminal_size()
@@ -2292,31 +2416,27 @@ class Result(object):
 
         if metadata:
             if colors:
-                print(' ' * (indent + pre) + colors.metadata + metadata + colors.reset)
+                print(' ' * (indent + 5) + colors.metadata + metadata + colors.reset)
             else:
-                print(' ' * (indent + pre) + metadata)
+                print(' ' * (indent + 5) + metadata)
+
+        fillwidth = (columns - (indent + 6)) if columns > indent + 6 else len(abstract)
+        wrapped_abstract = TrackedTextwrap(abstract, fillwidth)
+        if colors:
+            # Highlight matches.
+            for match in matches or []:
+                offset = match['offset']
+                span = len(match['phrase'])
+                wrapped_abstract.insert_zero_width_sequence('\x1b[1m', offset)
+                wrapped_abstract.insert_zero_width_sequence('\x1b[0m', offset + span)
 
         if colors:
-            # Start from the last match, as inserting the bold characters changes the offsets.
-            for match in reversed(matches or []):
-                abstract = (
-                    abstract[: match['offset']]
-                    + '\033[1m'
-                    + match['phrase']
-                    + '\033[0m'
-                    + abstract[match['offset'] + len(match['phrase']) :]
-                )
             print(colors.abstract, end='')
-        if columns > indent + 1 + pre:
-            # Try to fill to columns
-            fillwidth = columns - indent - 1
-            for line in textwrap.wrap(abstract.replace('\n', ''), width=fillwidth):
-                print('%s%s' % (' ' * (indent + pre), line))
-            print('')
-        else:
-            print('%s%s\n' % (' ' * pre, abstract.replace('\n', ' ')))
+        for line in wrapped_abstract.lines:
+            print('%s%s' % (' ' * (indent + 5), line))
         if colors:
             print(colors.reset, end='')
+        print('')
 
     def print(self):
         """Print the result entry."""
@@ -2324,8 +2444,8 @@ class Result(object):
         self._print_metadata_and_abstract(self.abstract, metadata=self.metadata, matches=self.matches)
 
         for sitelink in self.sitelinks:
-            self._print_title_and_url(sitelink.index, sitelink.title, sitelink.url, pre=4)
-            self._print_metadata_and_abstract(sitelink.abstract, pre=4)
+            self._print_title_and_url(sitelink.index, sitelink.title, sitelink.url, indent=4)
+            self._print_metadata_and_abstract(sitelink.abstract, indent=4)
 
     def jsonizable_object(self):
         """Return a JSON-serializable dict representing the result entry."""
@@ -2445,6 +2565,8 @@ class GooglerCmd(object):
 
         self.promptcolor = True if os.getenv('DISABLE_PROMPT_COLOR') is None else False
 
+        self.no_results_instructions_shown = False
+
     @property
     def options(self):
         """Current options."""
@@ -2482,7 +2604,7 @@ class GooglerCmd(object):
                 fp.write(page)
             logger.debug("Response body written to '%s'.", tmpfile)
 
-        parser = GoogleParser(page, news=self._google_url.news)
+        parser = GoogleParser(page, news=self._google_url.news, videos=self._google_url.videos)
 
         self.results = parser.results
         self._autocorrected = parser.autocorrected
@@ -2491,6 +2613,13 @@ class GooglerCmd(object):
         self._urltable = {}
         for r in self.results:
             self._urltable.update(r.urltable())
+
+    def warn_no_results(self):
+        printerr('No results.')
+        if not self.no_results_instructions_shown:
+            printerr('If you believe this is a bug, please review '
+                     'https://git.io/googler-no-results before submitting a bug report.')
+            self.no_results_instructions_shown = True
 
     @require_keywords
     def display_results(self, prelude='\n', json_output=False):
@@ -2509,7 +2638,7 @@ class GooglerCmd(object):
         else:
             # Regular output
             if not self.results:
-                print('No results.', file=sys.stderr)
+                self.warn_no_results()
             else:
                 sys.stderr.write(prelude)
                 for r in self.results:
@@ -2842,7 +2971,7 @@ class GooglerArgumentParser(argparse.ArgumentParser):
         file.write(textwrap.dedent("""
         Version %s
         Copyright © 2008 Henri Hakkinen
-        Copyright © 2015-2019 Arun Prakash Jana <engineerarun@gmail.com>
+        Copyright © 2015-2020 Arun Prakash Jana <engineerarun@gmail.com>
         Zhiming Wang <zmwangx@gmail.com>
         License: GPLv3
         Webpage: https://github.com/jarun/googler
@@ -2895,6 +3024,15 @@ class GooglerArgumentParser(argparse.ArgumentParser):
         except (TypeError, IndexError, ValueError):
             raise argparse.ArgumentTypeError('%s is not a valid duration' % arg)
         return arg
+
+    @staticmethod
+    def is_date(arg):
+        """Check if a string is a valid date/month/year accepted by Google."""
+        if re.match(r'^(\d+/){0,2}\d+$', arg):
+            return arg
+        else:
+            raise argparse.ArgumentTypeError('%s is not a valid date/month/year; '
+                                             'use the American date format with slashes')
 
     @staticmethod
     def is_colorstr(arg):
@@ -3173,6 +3311,8 @@ def parse_args(args=None, namespace=None):
            default=10, metavar='N', help='show N results (default 10)')
     addarg('-N', '--news', action='store_true',
            help='show results from news section')
+    addarg('-V', '--videos', action='store_true',
+           help='show results from videos section')
     addarg('-c', '--tld', metavar='TLD',
            help="""country-specific search with top-level domain .TLD, e.g., 'in'
            for India""")
@@ -3194,6 +3334,12 @@ def parse_args(args=None, namespace=None):
     addarg('-t', '--time', dest='duration', type=argparser.is_duration,
            metavar='dN', help='time limit search '
            '[h5 (5 hrs), d5 (5 days), w5 (5 weeks), m5 (5 months), y5 (5 years)]')
+    addarg('--from', type=argparser.is_date,
+           help="""starting date/month/year of date range; must use American date
+           format with slashes, e.g., 2/24/2020, 2/2020, 2020; can be used in
+           conjuction with --to, and overrides -t, --time""")
+    addarg('--to', type=argparser.is_date,
+           help='ending date/month/year of date range; see --from')
     addarg('-w', '--site', dest='sites', action='append', metavar='SITE',
            help='search a site using Google')
     addarg('--unfilter', action='store_true', help='do not omit similar results')
