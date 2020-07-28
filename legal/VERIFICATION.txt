@@ -7,7 +7,7 @@ Package can be verified like this:
 
 1. Go to
 
-   https://raw.githubusercontent.com/jarun/googler/v4.1/googler
+   https://raw.githubusercontent.com/jarun/googler/v4.2/googler
 
    to download the script (renamed to 'googler.py' in the package).
 
@@ -16,7 +16,7 @@ Package can be verified like this:
    - Use Chocolatey utility 'checksum.exe'
 
    checksum algorithm: SHA256
-   checksum: 307EB6C3B2AA6CEC3FFCF1A7D8CA3B7E96EF5F4B4E8A98B550567F5283806286
+   checksum: 62DF633975F2C4DAF66547CDF7574006B3ACD25EF8A6366EA1479998627E1145
 
 File 'LICENSE.txt' is obtained from:
    https://raw.githubusercontent.com/jarun/googler/master/LICENSE

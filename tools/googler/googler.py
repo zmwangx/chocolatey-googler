@@ -89,7 +89,7 @@ except ValueError:
 
 # Constants
 
-_VERSION_ = '4.1'
+_VERSION_ = '4.2'
 
 COLORMAP = {k: '\x1b[%sm' % v for k, v in {
     'a': '30', 'b': '31', 'c': '32', 'd': '33',
@@ -609,7 +609,7 @@ class TextNode(str, Node):
         """
         Two text nodes are equal if and only if they are the same node.
 
-        For string comparision, use :attr:`text`.
+        For string comparison, use :attr:`text`.
         """
         return self is other
 
@@ -617,7 +617,7 @@ class TextNode(str, Node):
         """
         Two text nodes are non-equal if they are not the same node.
 
-        For string comparision, use :attr:`text`.
+        For string comparison, use :attr:`text`.
         """
         return self is not other
 
@@ -1425,7 +1425,9 @@ def open_url(url):
         _stderr = os.dup(2)
         os.close(2)
         _stdout = os.dup(1)
-        os.close(1)
+        # Patch for GUI browsers on WSL
+        if "microsoft" not in platform.uname()[3].lower():
+            os.close(1)
         fd = os.open(os.devnull, os.O_RDWR)
         os.dup2(fd, 2)
         os.dup2(fd, 1)
@@ -1513,12 +1515,12 @@ class HardenedHTTPSConnection(HTTPSConnection):
     NOTE: TLS 1.2 is supported from Python 3.4
     """
 
-    def __init__(self, host, **kwargs):
+    def __init__(self, host, address_family=0, **kwargs):
         HTTPSConnection.__init__(self, host, **kwargs)
+        self.address_family = address_family
 
     def connect(self, notweak=False):
-        sock = socket.create_connection((self.host, self.port),
-                                        self.timeout, self.source_address)
+        sock = self.create_socket_connection()
 
         # Optimizations not available on OS X
         if not notweak and sys.platform.startswith('linux'):
@@ -1553,6 +1555,45 @@ class HardenedHTTPSConnection(HTTPSConnection):
 
         # Fallback
         HTTPSConnection.connect(self)
+
+    # Adapted from socket.create_connection.
+    # https://github.com/python/cpython/blob/bce4ddafdd188cc6deb1584728b67b9e149ca6a4/Lib/socket.py#L771-L813
+    def create_socket_connection(self):
+        err = None
+        results = socket.getaddrinfo(self.host, self.port, self.address_family, socket.SOCK_STREAM)
+        # Prefer IPv4 if address family isn't explicitly specified.
+        if self.address_family == 0:
+            results = sorted(results, key=lambda res: 1 if res[0] == socket.AF_INET else 2)
+        for af, socktype, proto, canonname, sa in results:
+            sock = None
+            try:
+                sock = socket.socket(af, socktype, proto)
+                if self.timeout is not None:
+                    sock.settimeout(self.timeout)
+                if self.source_address:
+                    sock.bind(self.source_address)
+                sock.connect(sa)
+                # Break explicitly a reference cycle
+                err = None
+                self.address_family = af
+                logger.debug('Opened socket to %s:%d',
+                             sa[0] if af == socket.AF_INET else ('[%s]' % sa[0]),
+                             sa[1])
+                return sock
+
+            except socket.error as _:
+                err = _
+                if sock is not None:
+                    sock.close()
+
+        if err is not None:
+            try:
+                raise err
+            finally:
+                # Break explicitly a reference cycle
+                err = None
+        else:
+            raise socket.error("getaddrinfo returns an empty list")
 
 
 class GoogleUrl(object):
@@ -1622,6 +1663,12 @@ class GoogleUrl(object):
             #'gbv': '1',  # control the presence of javascript on the page, 1=no js, 2=js
             'sei': base64.encodebytes(uuid.uuid1().bytes).decode("ascii").rstrip('=\n').replace('/', '_'),
         }
+
+        # In preloaded HTML parsing mode, set keywords to something so
+        # that we are not tripped up by require_keywords.
+        if opts.html_file and not opts.keywords:
+            opts.keywords = ['<debug>']
+
         self.update(opts, **kwargs)
 
     def __str__(self):
@@ -1966,9 +2013,10 @@ class GoogleConnection(object):
 
     """
 
-    def __init__(self, host, port=None, timeout=45, proxy=None, notweak=False):
+    def __init__(self, host, port=None, address_family=0, timeout=45, proxy=None, notweak=False):
         self._host = None
         self._port = None
+        self._address_family = address_family
         self._proxy = proxy
         self._notweak = notweak
         self._conn = None
@@ -2010,7 +2058,8 @@ class GoogleConnection(object):
             proxy_user_passwd, proxy_host_port = parse_proxy_spec(proxy)
 
             logger.debug('Connecting to proxy server %s', proxy_host_port)
-            self._conn = HardenedHTTPSConnection(proxy_host_port, timeout=timeout)
+            self._conn = HardenedHTTPSConnection(proxy_host_port,
+                                                 address_family=self._address_family, timeout=timeout)
 
             logger.debug('Tunnelling to host %s' % host_display)
             connect_headers = {}
@@ -2027,7 +2076,8 @@ class GoogleConnection(object):
                 raise GoogleConnectionError(msg)
         else:
             logger.debug('Connecting to new host %s', host_display)
-            self._conn = HardenedHTTPSConnection(host, port=port, timeout=timeout)
+            self._conn = HardenedHTTPSConnection(host, port=port,
+                                                 address_family=self._address_family, timeout=timeout)
             try:
                 self._conn.connect(self._notweak)
             except Exception as e:
@@ -2084,8 +2134,13 @@ class GoogleConnection(object):
             if resp.status in {301, 302, 303, 307, 308}:
                 redirection_url = resp.getheader('location', '')
                 if 'sorry/IndexRedirect?' in redirection_url or 'sorry/index?' in redirection_url:
-                    msg = textwrap.dedent("""\
-                    Connection blocked due to unusual activity.
+                    msg = "Connection blocked due to unusual activity.\n"
+                    if self._conn.address_family == socket.AF_INET6:
+                        msg += textwrap.dedent("""\
+                        You are connecting over IPv6 which is likely the problem. Try to make
+                        sure the machine has a working IPv4 network interface configured.
+                        See also the -4, --ipv4 option of googler.\n""")
+                    msg += textwrap.dedent("""\
                     THIS IS NOT A BUG, please do NOT report it as a bug unless you have specific
                     information that may lead to the development of a workaround.
                     You IP address is temporarily or permanently blocked by Google and requires
@@ -2205,6 +2260,9 @@ class GoogleParser(object):
                 import pdb
                 pdb.set_trace()
 
+        # cw is short for collapse_whitespace.
+        cw = lambda s: re.sub(r'[ \t\n\r]+', ' ', s) if s is not None else s
+
         index = 0
         for div_g in tree.select_all('div.g'):
             if div_g.select('.hp-xpdbox'):
@@ -2229,9 +2287,10 @@ class GoogleParser(object):
                     if 'f' in childnode.classes:
                         # .f is handled as metadata instead.
                         continue
-                    if childnode.tag == 'b' and childnode.text != '...':
-                        matched_keywords.append({'phrase': childnode.text, 'offset': len(abstract)})
-                    abstract = abstract + childnode.text.replace('\n', '')
+                    childnode_text = cw(childnode.text)
+                    if childnode.tag in ['b', 'em'] and childnode_text != '...':
+                        matched_keywords.append({'phrase': childnode_text, 'offset': len(abstract)})
+                    abstract = abstract + childnode_text
                 try:
                     metadata = div_g.select('.f').text
                     metadata = metadata.replace('\u200e', '').replace(' - ', ', ').strip().rstrip(',')
@@ -2245,13 +2304,21 @@ class GoogleParser(object):
                     a = td.select('a')
                     sl_title = a.text
                     sl_url = self.unwrap_link(a.attr('href'))
-                    sl_abstract = td.select('div.s.st').text
-                    sitelinks.append(Sitelink(sl_title, sl_url, sl_abstract))
+                    sl_abstract = td.select('div.s.st, div.s .st').text
+                    sitelink = Sitelink(cw(sl_title), sl_url, cw(sl_abstract))
+                    if sitelink not in sitelinks:
+                        sitelinks.append(sitelink)
                 except (AttributeError, ValueError):
                     continue
-            index += 1
-            self.results.append(Result(index, title, url, abstract,
-                                       metadata=metadata, sitelinks=sitelinks, matches=matched_keywords))
+            # cw cannot be applied to abstract here since it may screw
+            # up offsets of matches. Instead, each relevant node's text
+            # is whitespace-collapsed before being appended to abstract.
+            # We then hope for the best.
+            result = Result(index + 1, cw(title), url, abstract,
+                            metadata=cw(metadata), sitelinks=sitelinks, matches=matched_keywords)
+            if result not in self.results:
+                self.results.append(result)
+                index += 1
 
         if not self.results:
             for card in tree.select_all('g-card'):
@@ -2268,7 +2335,7 @@ class GoogleParser(object):
                 publisher, title, abstract, publishing_time = text_nodes
                 metadata = '%s, %s' % (publisher, publishing_time)
                 index += 1
-                self.results.append(Result(index, title, url, abstract, metadata=metadata))
+                self.results.append(Result(index, cw(title), url, cw(abstract), metadata=cw(metadata)))
 
         # Showing results for ...
         # Search instead for ...
@@ -2321,6 +2388,16 @@ class Sitelink(object):
         self.url = url
         self.abstract = abstract
         self.index = ''
+
+    def __eq__(self, other):
+        return (
+            self.title == other.title and
+            self.url == other.url and
+            self.abstract == other.abstract
+        )
+
+    def __hash__(self):
+        return hash((self.title, self.url, self.abstract))
 
 
 Colors = collections.namedtuple('Colors', 'index, title, url, metadata, abstract, prompt, reset')
@@ -2386,6 +2463,21 @@ class Result(object):
             self._urltable[fullindex] = sitelink.url
             subindex = chr(ord(subindex) + 1)
 
+    def __eq__(self, other):
+        return (
+            self.title == other.title and
+            self.url == other.url and
+            self.abstract == other.abstract and
+            self.metadata == other.metadata and
+            self.sitelinks == other.sitelinks and
+            self.matches == other.matches
+        )
+
+    def __hash__(self):
+        sitelinks_hashable = tuple(sitelinks) if sitelinks is not None else None
+        matches_hashable = tuple(matches) if matches is not None else None
+        return hash(self.title, self.url, self.abstract, self.metadata, self.sitelinks, self.matches)
+
     def _print_title_and_url(self, index, title, url, indent=0):
         colors = self.colors
 
@@ -2420,22 +2512,24 @@ class Result(object):
             else:
                 print(' ' * (indent + 5) + metadata)
 
-        fillwidth = (columns - (indent + 6)) if columns > indent + 6 else len(abstract)
-        wrapped_abstract = TrackedTextwrap(abstract, fillwidth)
-        if colors:
-            # Highlight matches.
-            for match in matches or []:
-                offset = match['offset']
-                span = len(match['phrase'])
-                wrapped_abstract.insert_zero_width_sequence('\x1b[1m', offset)
-                wrapped_abstract.insert_zero_width_sequence('\x1b[0m', offset + span)
+        if abstract:
+            fillwidth = (columns - (indent + 6)) if columns > indent + 6 else len(abstract)
+            wrapped_abstract = TrackedTextwrap(abstract, fillwidth)
+            if colors:
+                # Highlight matches.
+                for match in matches or []:
+                    offset = match['offset']
+                    span = len(match['phrase'])
+                    wrapped_abstract.insert_zero_width_sequence('\x1b[1m', offset)
+                    wrapped_abstract.insert_zero_width_sequence('\x1b[0m', offset + span)
 
-        if colors:
-            print(colors.abstract, end='')
-        for line in wrapped_abstract.lines:
-            print('%s%s' % (' ' * (indent + 5), line))
-        if colors:
-            print(colors.reset, end='')
+            if colors:
+                print(colors.abstract, end='')
+            for line in wrapped_abstract.lines:
+                print('%s%s' % (' ' * (indent + 5), line))
+            if colors:
+                print(colors.reset, end='')
+
         print('')
 
     def print(self):
@@ -2477,6 +2571,10 @@ class Result(object):
 
         """
         return self._urltable
+
+    @staticmethod
+    def collapse_whitespace(s):
+        return re.sub(r'[ \t\n\r]+', ' ', s)
 
 
 class GooglerCmdException(Exception):
@@ -2552,10 +2650,19 @@ class GooglerCmd(object):
         self._opts = opts
 
         self._google_url = GoogleUrl(opts)
-        proxy = opts.proxy if hasattr(opts, 'proxy') else None
-        self._conn = GoogleConnection(self._google_url.hostname, proxy=proxy,
-                                      notweak=opts.notweak)
-        atexit.register(self._conn.close)
+
+        if opts.html_file:
+            # Preloaded HTML parsing mode, do not initialize connection.
+            self._preload_from_file = opts.html_file
+            self._conn = None
+        else:
+            self._preload_from_file = None
+            proxy = opts.proxy if hasattr(opts, 'proxy') else None
+            self._conn = GoogleConnection(self._google_url.hostname,
+                                        address_family=opts.address_family,
+                                        proxy=proxy,
+                                        notweak=opts.notweak)
+            atexit.register(self._conn.close)
 
         self.results = []
         self._autocorrected = None
@@ -2594,15 +2701,18 @@ class GooglerCmd(object):
         """
         # This method also sets self._results_filtered and
         # self._urltable.
-        page = self._conn.fetch_page(self._google_url.relative())
-
-        if logger.isEnabledFor(logging.DEBUG):
-            import tempfile
-            fd, tmpfile = tempfile.mkstemp(prefix='googler-response-', suffix='.html')
-            os.close(fd)
-            with open(tmpfile, 'w', encoding='utf-8') as fp:
-                fp.write(page)
-            logger.debug("Response body written to '%s'.", tmpfile)
+        if self._preload_from_file:
+            with open(self._preload_from_file, encoding='utf-8') as fp:
+                page = fp.read()
+        else:
+            page = self._conn.fetch_page(self._google_url.relative())
+            if logger.isEnabledFor(logging.DEBUG):
+                import tempfile
+                fd, tmpfile = tempfile.mkstemp(prefix='googler-response-', suffix='.html')
+                os.close(fd)
+                with open(tmpfile, 'w', encoding='utf-8') as fp:
+                    fp.write(page)
+                logger.debug("Response body written to '%s'.", tmpfile)
 
         parser = GoogleParser(page, news=self._google_url.news, videos=self._google_url.videos)
 
@@ -2847,6 +2957,8 @@ class GooglerCmd(object):
                     copier_params = ['xsel', '-b', '-i']
                 elif shutil.which('xclip') is not None:
                     copier_params = ['xclip', '-selection', 'clipboard']
+                elif shutil.which('wl-copy') is not None:
+                    copier_params = ['wl-copy']
                 elif shutil.which('termux-clipboard-set') is not None:
                     copier_params = ['termux-clipboard-set']
             elif sys.platform == 'darwin':
@@ -3053,6 +3165,29 @@ def system_is_windows():
     return sys.platform in {'win32', 'cygwin'}
 
 
+def get_latest_ref(include_git=False):
+    """Helper for download_latest_googler."""
+    import urllib.request
+
+    if include_git:
+        # Get SHA of latest commit on master
+        request = urllib.request.Request('%s/commits/master' % API_REPO_BASE,
+                                         headers={'Accept': 'application/vnd.github.v3.sha'})
+        response = urllib.request.urlopen(request)
+        if response.status != 200:
+            raise http.client.HTTPException(response.reason)
+        return response.read().decode('utf-8')
+    else:
+        # Get name of latest tag
+        request = urllib.request.Request('%s/releases?per_page=1' % API_REPO_BASE,
+                                         headers={'Accept': 'application/vnd.github.v3+json'})
+        response = urllib.request.urlopen(request)
+        if response.status != 200:
+            raise http.client.HTTPException(response.reason)
+        import json
+        return json.loads(response.read().decode('utf-8'))[0]['tag_name']
+
+
 def download_latest_googler(include_git=False):
     """Download latest googler to a temp file.
 
@@ -3073,27 +3208,8 @@ def download_latest_googler(include_git=False):
          file.
 
     """
-    import urllib.request
-
-    if include_git:
-        # Get SHA of latest commit on master
-        request = urllib.request.Request('%s/commits/master' % API_REPO_BASE,
-                                         headers={'Accept': 'application/vnd.github.v3.sha'})
-        response = urllib.request.urlopen(request)
-        if response.status != 200:
-            raise http.client.HTTPException(response.reason)
-        git_ref = response.read().decode('utf-8')
-    else:
-        # Get name of latest tag
-        request = urllib.request.Request('%s/releases?per_page=1' % API_REPO_BASE,
-                                         headers={'Accept': 'application/vnd.github.v3+json'})
-        response = urllib.request.urlopen(request)
-        if response.status != 200:
-            raise http.client.HTTPException(response.reason)
-        import json
-        git_ref = json.loads(response.read().decode('utf-8'))[0]['tag_name']
-
     # Download googler to a tempfile
+    git_ref = get_latest_ref(include_git=include_git)
     googler_download_url = '%s/%s/googler' % (RAW_DOWNLOAD_REPO_BASE, git_ref)
     printerr('Downloading %s' % googler_download_url)
     request = urllib.request.Request(googler_download_url,
@@ -3171,6 +3287,53 @@ def self_upgrade(include_git=False):
         printerr('Upgraded to %s.' % git_ref)
     else:
         printerr('Already up to date.')
+
+
+def check_new_version():
+    try:
+        from distutils.version import StrictVersion as Version
+    except ImportError:
+        # distutils not available (thanks distros), use a concise poor
+        # man's version parser.
+        class Version(tuple):
+            def __new__(cls, version_str):
+                def parseint(s):
+                    try:
+                        return int(s)
+                    except ValueError:
+                        return 0
+                return tuple.__new__(cls, [parseint(s) for s in version_str.split('.')])
+
+    import pathlib
+    import tempfile
+    import time
+    cache = pathlib.Path(tempfile.gettempdir()) / 'googler-latest-version'
+    latest_version_str = None
+    # Try to load latest version string from cached location, if it
+    # exists and is fresh enough.
+    try:
+        if cache.is_file() and time.time() - cache.stat().st_mtime < 86400:
+            latest_version_str = cache.read_text().strip()
+    except OSError:
+        pass
+    if not latest_version_str:
+        try:
+            latest_version_str = get_latest_ref().lstrip('v')
+            cache.write_text(latest_version_str)
+        except Exception:
+            pass
+    if not latest_version_str:
+        return
+    # Try to fetch latest version string from GitHub.
+    try:
+        current_version = Version(_VERSION_)
+        latest_version = Version(latest_version_str)
+    except ValueError:
+        return
+    if latest_version > current_version:
+        print('\x1b[33;1mThe latest release of googler is v%s, please upgrade.\x1b[0m'
+              % latest_version_str,
+              file=sys.stderr)
 
 
 # Miscellaneous functions
@@ -3337,7 +3500,7 @@ def parse_args(args=None, namespace=None):
     addarg('--from', type=argparser.is_date,
            help="""starting date/month/year of date range; must use American date
            format with slashes, e.g., 2/24/2020, 2/2020, 2020; can be used in
-           conjuction with --to, and overrides -t, --time""")
+           conjunction with --to, and overrides -t, --time""")
     addarg('--to', type=argparser.is_date,
            help='ending date/month/year of date range; see --from')
     addarg('-w', '--site', dest='sites', action='append', metavar='SITE',
@@ -3346,7 +3509,7 @@ def parse_args(args=None, namespace=None):
     addarg('-p', '--proxy', default=https_proxy_from_environment(),
            help="""tunnel traffic through an HTTP proxy;
            PROXY is of the form [http://][user:password@]proxyhost[:port]""")
-    addarg('--noua', action='store_true', help='legacy option (no effect)')
+    addarg('--noua', action='store_true', help=argparse.SUPPRESS)
     addarg('--notweak', action='store_true',
            help='disable TCP optimizations and forced TLS 1.2')
     addarg('--json', action='store_true',
@@ -3357,6 +3520,13 @@ def parse_args(args=None, namespace=None):
            help='do not suppress browser output (stdout and stderr)')
     addarg('--np', '--noprompt', dest='noninteractive', action='store_true',
            help='search and exit, do not prompt')
+    addarg('-4', '--ipv4', action='store_const', dest='address_family',
+           const=socket.AF_INET, default=0,
+           help="""only connect over IPv4
+           (by default, IPv4 is preferred but IPv6 is used as a fallback)""")
+    addarg('-6', '--ipv6', action='store_const', dest='address_family',
+           const=socket.AF_INET6, default=0,
+           help='only connect over IPv6')
     addarg('keywords', nargs='*', metavar='KEYWORD', help='search keywords')
     if ENABLE_SELF_UPGRADE_MECHANISM and not system_is_windows():
         addarg('-u', '--upgrade', action='store_true',
@@ -3367,6 +3537,8 @@ def parse_args(args=None, namespace=None):
     addarg('-d', '--debug', action='store_true', help='enable debugging')
     # Hidden option for interacting with DOM in an IPython/pdb shell
     addarg('-D', '--debugger', action='store_true', help=argparse.SUPPRESS)
+    # Hidden option for parsing dumped HTML
+    addarg('--parse', dest='html_file', help=argparse.SUPPRESS)
     addarg('--complete', help=argparse.SUPPRESS)
 
     parsed = argparser.parse_args(args, namespace)
@@ -3385,6 +3557,8 @@ def main():
             logger.setLevel(logging.DEBUG)
             logger.debug('googler version %s', _VERSION_)
             logger.debug('Python version %s', python_version())
+            logger.debug('Platform: %s', platform.platform())
+            check_new_version()
 
         if opts.debugger:
             global debugger
@@ -3445,8 +3619,8 @@ def main():
 
         repl = GooglerCmd(opts)
 
-        if opts.json or opts.lucky or opts.noninteractive:
-            # Non-interactive mode
+        # Non-interactive mode
+        if opts.json or opts.lucky or opts.noninteractive or opts.html_file:
             repl.fetch()
             if opts.lucky:
                 if repl.results:
@@ -3457,9 +3631,9 @@ def main():
                 repl.showing_results_for_alert(interactive=False)
                 repl.display_results(json_output=opts.json)
             sys.exit(0)
-        else:
-            # Interactive mode
-            repl.cmdloop()
+
+        # Interactive mode
+        repl.cmdloop()
     except Exception as e:
         # With debugging on, let the exception through for a traceback;
         # otherwise, only print the exception error message.
