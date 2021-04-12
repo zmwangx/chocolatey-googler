@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # Copyright © 2008 Henri Hakkinen
-# Copyright © 2015-2020 Arun Prakash Jana <engineerarun@gmail.com>
+# Copyright © 2015-2021 Arun Prakash Jana <engineerarun@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -35,6 +35,7 @@ import shutil
 import signal
 import socket
 import ssl
+import subprocess
 from subprocess import Popen, PIPE, DEVNULL
 import sys
 import textwrap
@@ -89,8 +90,8 @@ except ValueError:
 
 # Constants
 
-_VERSION_ = '4.3.1'
-_EPOCH_ = '20201001'
+_VERSION_ = '4.3.2'
+_EPOCH_ = '20210115'
 
 COLORMAP = {k: '\x1b[%sm' % v for k, v in {
     'a': '30', 'b': '31', 'c': '32', 'd': '33',
@@ -1455,8 +1456,7 @@ def open_url(url):
 
     # Custom URL handler gets max priority
     if hasattr(open_url, 'url_handler'):
-        p = Popen([open_url.url_handler, url], stdin=PIPE)
-        p.communicate()
+        subprocess.run([open_url.url_handler, url])
         return
 
     browser = webbrowser.get()
@@ -1554,6 +1554,26 @@ def check_stdout_encoding():
             ioencoding=ioencoding,
         ))))
         sys.exit(1)
+
+
+def time_it(description=None):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapped(*args, **kwargs):
+            # Only profile in debug mode.
+            if not logger.isEnabledFor(logging.DEBUG):
+                return func(*args, **kwargs)
+
+            import time
+            mark = time.perf_counter()
+            ret = func(*args, **kwargs)
+            duration = time.perf_counter() - mark
+            logger.debug('%s completed in \x1b[33m%.3fs\x1b[0m', description or func.__name__, duration)
+            return ret
+
+        return wrapped
+
+    return decorator
 
 
 # Classes
@@ -2084,6 +2104,7 @@ class GoogleConnection(object):
         """The host currently connected to."""
         return self._host
 
+    @time_it()
     def new_connection(self, host=None, port=None, timeout=45):
         """Close the current connection (if any) and establish a new one.
 
@@ -2148,6 +2169,7 @@ class GoogleConnection(object):
         """
         self.new_connection(timeout=timeout)
 
+    @time_it()
     def fetch_page(self, url):
         """Fetch a URL.
 
@@ -2303,6 +2325,7 @@ class GoogleParser(object):
         self.results = []
         self.parse(html)
 
+    @time_it()
     def parse(self, html):
         tree = parse_html(html)
 
@@ -2346,7 +2369,11 @@ class GoogleParser(object):
                     # Note that a filetype tag (e.g. PDF) is now pretty
                     # damn hard to parse with confidence (that it'll
                     # survive the slighest further change), so we don't.
-                    title_node, details_node, *_ = div_g.select_all('div.rc > div')
+
+                    # As of January 15th 2021, the html class is not rc anymore, it's tF2Cxc.
+                    # This approach is not very resilient to changes by Google, but it works for now.
+                    # title_node, details_node, *_ = div_g.select_all('div.rc > div')
+                    title_node, details_node, *_ = div_g.select_all('div.tF2Cxc > div')
                     if 'yuRUbf' not in title_node.classes:
                         logger.debug('unexpected title node class(es): expected %r, got %r',
                                      'yuRUbf', ' '.join(title_node.classes))
@@ -3223,7 +3250,7 @@ class GooglerArgumentParser(argparse.ArgumentParser):
         file.write(textwrap.dedent("""
         Version %s
         Copyright © 2008 Henri Hakkinen
-        Copyright © 2015-2020 Arun Prakash Jana <engineerarun@gmail.com>
+        Copyright © 2015-2021 Arun Prakash Jana <engineerarun@gmail.com>
         Zhiming Wang <zmwangx@gmail.com>
         License: GPLv3
         Webpage: https://github.com/jarun/googler
