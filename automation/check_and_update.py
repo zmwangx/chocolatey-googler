@@ -72,6 +72,11 @@ def verification_repl(
     return content
 
 
+def github_setenv(key: str, val: str) -> None:
+    with open(os.getenv("GITHUB_ENV"), "a") as fp:
+        fp.write(f"{key}={val}\n")
+
+
 def main():
     current_version = get_current_version()
     latest_version = get_latest_version()
@@ -91,8 +96,8 @@ def main():
     )
     if os.getenv("GITHUB_WORKFLOW"):
         # Running in GitHub Actions; export env vars for future steps.
-        print("::set-env name=UPDATED::true")
-        print(f"::set-env name=NEW_VERSION::{latest_version}")
+        github_setenv("UPDATED", "true")
+        github_setenv("NEW_VERSION", latest_version)
 
 
 if __name__ == "__main__":
