@@ -48,4 +48,4 @@ jobs:
         with:
           name: googler.${{ env.NEW_VERSION }}.nupkg
           path: googler.${{ env.NEW_VERSION }}.nupkg
-        if: env.UPDATED == 'true'
+        if: env.UPDATED == 'true' && github.ref == 'refs/heads/master'
